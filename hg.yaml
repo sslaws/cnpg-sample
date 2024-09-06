@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hgdb-app
+type: kubernetes.io/basic-auth
+data:
+  username: [BASE64_ENCODED_USERNAME]
+  password: [BASE64_ENCODED_PASSWORD]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backup-creds
+data:
+  ACCESS_KEY_ID: [BASE64_ENCODED_ACCESS_KEY_ID]
+  ACCESS_SECRET_KEY: [BASE64_ENCODED_ACCESS_SECRET_KEY]
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: hgpooler
+spec:
+  cluster:
+    name: hgdb
+  instances: 3
+  type: rw
+  pgbouncer:
+    poolMode: session
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "5"
+      min_pool_size: "1"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: hgdb
+spec:
+  description: "Health Gateway local Database"
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  instances: 3
+  enablePDB: true
+  startDelay: 300
+  stopDelay: 300
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
+  postgresql:
+    parameters:
+      shared_buffers: 256MB
+      pg_stat_statements.max: '10000'
+      pg_stat_statements.track: all
+      auto_explain.log_min_duration: '10s'
+
+  bootstrap:
+    initdb:
+      database: hglocal
+      owner: hglocal
+      secret:
+        name: hgdb-app
+      encoding: 'UTF8'
+      localeCollate: 'en_US.UTF-8'
+      localeCType: 'en_US.UTF-8'
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+
+  storage:
+    storageClass: standard
+    size: 5Gi
+
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://[BUCKET_NAME]
+      endpointURL: [ENDPOINT_URL]
+      s3Credentials:
+        accessKeyId:
+          name: backup-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: backup-creds
+          key: ACCESS_SECRET_KEY
+      wal:
+        compression: bzip2
+        maxParallel: 8
+      data:
+        compression: bzip2
+        immediateCheckpoint: false
+        jobs: 5
+    target: prefer-standby
+    retentionPolicy: "10d"
+
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
+      cpu: "2"
+
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: failure-domain.beta.kubernetes.io/zone
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: hgdb-nightly
+spec:
+  immediate: true
+  schedule: "0 0 3 * * *" # See https://pkg.go.dev/github.com/robfig/cron#hdr-CRON_Expression_Format
+  backupOwnerReference: self
+  cluster:
+    name: hgdb
